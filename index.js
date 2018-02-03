@@ -26,8 +26,18 @@ class Bot {
 
     this.bot.onText(/\/echo (.+)/, this.echoCallback);
     this.bot.onText(/\/cancel/, this.rejectCV);
-    this.bot.onText(/\/reject (.+)/, this.rejectCV);
     this.bot.onText(/\/create/, this.createCV);
+
+    // getChatMember
+
+    this.bot.on('callback_query', (cq) => {
+      const [sudo, status, id] = cq.data.split('_');
+      if (!sudo) return;
+      if (status === 'approved') this.approveCV(+id, false); // ))))))))))
+      if (status === 'rejected') this.rejectCV(+id, false);  // ))))))))))
+      this.notifyUser(id, status);
+      this.bot.deleteMessage(process.env.ADMIN_GROUP, cq.message.message_id);
+    });
 
     this.bot.on('message', this.messageCallback);
 
@@ -47,12 +57,16 @@ class Bot {
 
     const record = this.db.get('cvs').find({ id: msg.chat.id });
 
-    // if stage on start
+    if (msg.text === '/create') {
+      return;
+    }
+
     if (!record.value()) {
-      return this.createCV(msg);
+      return this.bot.sendMessage(msg.chat.id, this.dictionary.create);
     }
 
     if (msg.entities && msg.text === '/cancel') return; // kostil
+
 
     if (record.value().stage === 'pending') {
       return this.bot.sendMessage(msg.chat.id, this.dictionary.cancel);
@@ -102,29 +116,68 @@ class Bot {
     const db = this.db.get('cvs');
     const record = db.find({ id }).value();
     if (!record) return;
-    this.bot.sendPhoto(process.env.ADMIN_GROUP, record.photo.pop().file_id, {
-      caption: `${record.username}\n\n${record.text}`,
+    this.bot.sendPhoto(process.env.ADMIN_GROUP, record.photo[0].file_id, {
+      caption: this.genCaption(record.username, record.text),
       reply_markup: {
         inline_keyboard: [
-          [{ text: 'ok (еще не работает)', callback_data: 'null' }],
-          [{ text: 'на хуй (еще не работает)', callback_data: 'null' }],
+          [{ text: 'ok (еще не работает)', callback_data: `sudo_approved_${record.id}` }],
+          [{ text: 'на хуй (еще не работает)', callback_data: `sudo_rejected_${record.id}` }],
         ],
       },
     });
   }
 
-  notifyUser() {}
+  notifyUser(id, status) {
+    return this.bot.sendMessage(id, this.dictionary[status]);
+  }
 
-  approveCV() {}
+  approveCV(id, notify = true) {
+    const record = this.db.get('cvs').find({ id });
+    if (!record) return;
 
-  rejectCV(msg, match=null) {
-    if (match[1]) return console.log('bb', match)
-    const record = this.db.get('cvs').find({ id: msg.chat.id });
+    let url;
+
+    const { username, text } = record.value();
+    const { file_id } = record.value().photo[0];
+
     record.assign({
-      id: `00000${msg.chat.id}`,
+      id: `10000${id}`,
+      stage: 'approved',
+    }).write();
+
+    if (notify) return this.bot.sendMessage(id, this.dictionary.done); // mb useless...
+
+    if (username) url = 'https://t.me/' + username;
+
+    this.bot.sendPhoto(process.env.CHANNEL, file_id, {
+      caption: this.genCaption(username, text),
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: username, callback_data: `bbwy_open_10000${id}`, url }],
+        ],
+      },
+    });
+  }
+
+  rejectCV(msg, notify = true) {
+    const id = msg.chat && msg.chat.id || msg;
+    const record = this.db.get('cvs').find({ id });
+
+    if (!record) return;
+
+    record.assign({
+      id: `00000${id}`,
       stage: 'rejected'
     }).write();
-    return this.bot.sendMessage(msg.chat.id, this.dictionary.done);
+
+    if (notify) return this.bot.sendMessage(id, this.dictionary.done);
+  }
+
+  genCaption(username, text) {
+    let txt = '';
+    if (username) txt += username + '\n\n';
+    txt += text;
+    return txt;
   }
 
 }
