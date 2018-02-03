@@ -4,18 +4,46 @@ const requestPromise = require('request-promise');
 const { expect } = require('chai');
 require('dotenv').config();
 
-function request(uri) {
+function request(uri, formData = {}) {
   return requestPromise({
     uri,
+    formData,
     json: true,
   });
 }
+const apiBaseUrl = `https://api.telegram.org/bot${process.env.TOKEN}`;
 
 const apis = {
-  getMe: `https://api.telegram.org/bot${process.env.TOKEN}/getMe`,
-  sendMessage: `https://api.telegram.org/bot${process.env.TOKEN}/sendMessage?chat_id=${process.env.CHAT}&text=`
+  getMe: `${apiBaseUrl}/getMe`,
+  sendMessage: `${apiBaseUrl}/sendMessage?chat_id=${process.env.CHAT}&text=`,
+  /*
+   * Media is a file id on TG server, or url from internet.
+   * "attach://<file_attach_name>" to upload a new one using 
+   * multipart/form-data under <file_attach_name> name
+   */
+  inputPhoto: `${apiBaseUrl}/InputMediaPhoto?type=photo&media=`
 }
 
+describe('Image upload test', () => {
+  it('should upload a new photo', (done) => {
+    request(apis.inputPhoto, { attachments: [`attach://${__dirname + "/DSC02300.jpg"}`] })
+      .then(resp => {
+        expect(resp.ok).to.equal(true);
+        done();
+      }).catch(done);
+  });
+  it('should fail to upload an existing photo on TG servers', (done) => {
+    request(apis.inputPhoto + 'id4234324').
+  });
+
+  it('should upload a photo from url', (done) => {
+    request(apis.inputPhoto + 'https://www.rca.ac.uk/media/images/2_30.focus-none.width-400.jpg')
+      .then(resp => {
+        expect(resp.ok).to.equal(true);
+        done();
+      }).catch(done);
+  });
+})
 describe('Existential Bot Test', () => {
   it('should return bot', (done) => {
     request(apis.getMe).then((resp) => {
