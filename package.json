@@ -18,6 +18,7 @@
   "homepage": "https://github.com/fffuture/existential_bot#readme",
   "dependencies": {
     "dotenv": "^5.0.0",
+    "lowdb": "^1.0.0",
     "node-telegram-bot-api": "^0.30.0"
   },
   "devDependencies": {
