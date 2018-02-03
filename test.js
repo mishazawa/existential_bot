@@ -32,8 +32,12 @@ describe('Image upload test', () => {
         done();
       }).catch(done);
   });
+  
   it('should fail to upload an existing photo on TG servers', (done) => {
-    request(apis.inputPhoto + 'id4234324').
+    request(apis.inputPhoto + 'id4234324').then(resp => {
+        expect(resp.ok).to.equal(false);
+        done();
+    }).catch(done);
   });
 
   it('should upload a photo from url', (done) => {
