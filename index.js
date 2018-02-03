@@ -4,7 +4,6 @@ const FileSync = require('lowdb/adapters/FileSync')
 
 require('dotenv').config();
 
-
 let __run__;
 
 class Bot {
@@ -22,6 +21,7 @@ class Bot {
     this.messageCallback = this.messageCallback.bind(this);
     this.createCV = this.createCV.bind(this);
     this.rejectCV = this.rejectCV.bind(this);
+    this.notifyAdmin = this.notifyAdmin.bind(this);
 
 
     this.bot.onText(/\/echo (.+)/, this.echoCallback);
@@ -43,6 +43,8 @@ class Bot {
   }
 
   messageCallback(msg) {
+    if (msg.chat.type !== 'private') return;
+
     const record = this.db.get('cvs').find({ id: msg.chat.id });
 
     // if stage on start
@@ -65,6 +67,7 @@ class Bot {
         stage: 'pending',
         photo: msg.photo,
       }).write();
+      this.notifyAdmin(msg.chat.id);
       return this.bot.sendMessage(msg.chat.id, this.dictionary.cancel);
     }
 
@@ -95,7 +98,20 @@ class Bot {
     this.bot.sendMessage(chatId, this.dictionary.welcome);
   }
 
-  notifyAdmin() {}
+  notifyAdmin(id) {
+    const db = this.db.get('cvs');
+    const record = db.find({ id }).value();
+    if (!record) return;
+    this.bot.sendPhoto(process.env.ADMIN_GROUP, record.photo.pop().file_id, {
+      caption: `${record.username}\n\n${record.text}`,
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: 'ok (еще не работает)', callback_data: 'null' }],
+          [{ text: 'на хуй (еще не работает)', callback_data: 'null' }],
+        ],
+      },
+    });
+  }
 
   notifyUser() {}
 
