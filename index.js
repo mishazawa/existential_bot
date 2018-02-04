@@ -1,6 +1,7 @@
 const TelegramBot = require('node-telegram-bot-api');
-const low = require('lowdb')
-const FileSync = require('lowdb/adapters/FileSync')
+const FileSync = require('lowdb/adapters/FileSync');
+const low = require('lowdb');
+const winston = require('winston');
 
 require('dotenv').config();
 
@@ -8,108 +9,198 @@ let __run__;
 
 class Bot {
   constructor(token = process.env.TOKEN) {
-    this.dictionary = low(new FileSync('dictionary.json')).getState();
     this.db = low(new FileSync('db.json'));
+    this.dictionary = low(new FileSync('dictionary.json')).getState();
+
+    this.log = winston.createLogger({
+      format: winston.format.json(),
+      transports: [
+        new winston.transports.File({ filename: './logs/info.log', level: 'info' }),
+        new winston.transports.File({ filename: './logs/error.log', level: 'error' }),
+        new winston.transports.File({ filename: './logs/combined.log' })
+      ]
+    });
+
 
     if (!this.db.has('posts').value()) {
       this.db.defaults({ cvs: [] }).write();
     }
 
-    this.bot = new TelegramBot(token, { polling: true });
-
-    this.echoCallback = this.echoCallback.bind(this);
     this.messageCallback = this.messageCallback.bind(this);
-    this.createCV = this.createCV.bind(this);
     this.rejectCV = this.rejectCV.bind(this);
     this.notifyAdmin = this.notifyAdmin.bind(this);
 
+    this.parseCommand = this.parseCommand.bind(this);
+    this.runBotCommand = this.runBotCommand.bind(this);
+    this.startCommand = this.startCommand.bind(this);
+    this.startScript = this.startScript.bind(this);
+    this.createCommand = this.createCommand.bind(this);
+    this.cancelCommand = this.cancelCommand.bind(this);
 
-    this.bot.onText(/\/echo (.+)/, this.echoCallback);
-    this.bot.onText(/\/cancel/, this.rejectCV);
-    this.bot.onText(/\/create/, this.createCV);
+    this.commands = {
+      '/start': this.startCommand,
+      '/create': this.createCommand,
+      '/cancel': this.cancelCommand,
+      '/help': null,
+    };
 
+    this.errors = {
+      'NOUNAME': null,
+    };
+
+    this.bot = new TelegramBot(token, { polling: true });
+    this.log.info(`Bot start ${new Date()}`)
     // getChatMember
 
     this.bot.on('callback_query', (cq) => {
       const [sudo, status, id] = cq.data.split('_');
-      if (!sudo) return;
-      if (status === 'approved') this.approveCV(+id, false); // ))))))))))
-      if (status === 'rejected') this.rejectCV(+id, false);  // ))))))))))
-      this.notifyUser(id, status);
-      this.bot.deleteMessage(process.env.ADMIN_GROUP, cq.message.message_id);
+
+      if (sudo) {
+        if (status === 'approved') this.approveCV(+id, false); // ))))))))))
+        if (status === 'rejected') this.rejectCV(+id, false);  // ))))))))))
+        this.notifyUser(id, status);
+        return this.bot.deleteMessage(process.env.ADMIN_GROUP, cq.message.message_id);
+      }
+
+      if (status === 'like' || status === 'dislike') {
+        this.log.info({ cq });
+
+        const record = this.db.get('cvs').find({ id });
+        const value = record.value();
+
+        const alreadyLiked = value.like.some(ent => ent.id === cq.from.id);
+        const alreadyDisliked = value.dislike.some(ent => ent.id === cq.from.id);
+
+        if (alreadyLiked || alreadyDisliked) {
+          value.like = value.like.filter(ent => ent.id !== cq.from.id);
+          value.dislike = value.dislike.filter(ent => ent.id !== cq.from.id);
+        }
+
+        if ((!alreadyLiked && status === 'like') || (!alreadyDisliked && status === 'dislike')) {
+          value[status].push(cq.from);
+        }
+
+        record.assign({
+          like: value.like,
+          dislike: value.dislike,
+        }).write();
+
+        this.bot.editMessageReplyMarkup({
+            inline_keyboard: this.likeKeyboard(id, value.like.length, value.dislike.length)
+          }, {
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+          });
+      }
     });
 
     this.bot.on('message', this.messageCallback);
 
     this.bot.on('polling_error', (error) => {
-      console.log(error);  // => 'EFATAL'
+      console.log(error)
+      this.log.error({ error });
     });
   }
 
-  echoCallback(msg, match) {
-    const chatId = msg.chat.id;
-    const resp = match[1];
-    this.bot.sendMessage(chatId, resp);
+  runBotCommand(msg) {
+    const cmdEntitie = msg.entities.find(ent => ent.type === 'bot_command');
+    const cmdText = msg.text.slice(cmdEntitie.offset, cmdEntitie.offset + cmdEntitie.length);
+    return this.commands[cmdText] && this.commands[cmdText](msg);
   }
 
-  messageCallback(msg) {
-    if (msg.chat.type !== 'private') return;
+  startCommand(msg) {
+    return this.bot.sendMessage(msg.chat.id, this.dictionary.startReply);
+  }
+
+  createCommand(msg) {
+    this.startScript(msg, (err) => {
+      if (err) return this.handleInputError(err, msg);
+      return this.bot.sendMessage(msg.chat.id, this.dictionary.createReply);
+    });
+  }
+
+  cancelCommand(msg) {
+    const record = this.db.get('cvs').find({ id: msg.chat.id });
+
+    if (!record) return this.startCommand(msg);
+
+    record.assign({
+      id: `00000${msg.chat.id}`,
+      stage: 'canceled'
+    }).write();
+
+    return this.bot.sendMessage(msg.chat.id, this.dictionary.done);
+  }
+
+  handleInputError(err, msg) {
+    return this.bot.sendMessage(msg.chat.id, this.dictionary.errors[err]);
+  }
+
+  startScript(msg, cb) {
+    if (!msg.from.username) return cb('NOUNAME');
 
     const record = this.db.get('cvs').find({ id: msg.chat.id });
 
-    if (msg.text === '/create') {
-      return;
+    if (!record.value()) {
+      this.db.get('cvs').push({
+        id: msg.chat.id,
+        username: `@${msg.from.username}`,
+        stage: 'start',
+        create_date: new Date(),
+      }).write()
     }
+    return cb(null);
+  }
+
+  answerToMessage(msg) {
+    const record = this.db.get('cvs').find({ id: msg.chat.id });
 
     if (!record.value()) {
-      return this.bot.sendMessage(msg.chat.id, this.dictionary.create);
+      return this.startCommand(msg);
     }
 
-    if (msg.entities && msg.text === '/cancel') return; // kostil
+    // write info about user
+    if (record.value().stage === 'start') {
+      if (!msg.entities || !msg.entities.some(ent => ent.type === 'hashtag')) {
+        return this.bot.sendMessage( msg.chat.id, this.dictionary.hashtag);
+      }
 
+      record.assign({
+        stage: 'info',
+        text: msg.text,
+        update_date: new Date(),
+        hashtag: msg.entities.map(item => msg.text.slice(item.offset, item.offset + item.length)),
+      }).write();
 
-    if (record.value().stage === 'pending') {
-      return this.bot.sendMessage(msg.chat.id, this.dictionary.cancel);
-    }
-
-    if (record.value().stage === 'info' && !msg.photo) {
       return this.bot.sendMessage( msg.chat.id, this.dictionary.attachPhoto);
     }
 
-    if (record.value().stage === 'info' && msg.photo) {
+    // attach photo
+    if (record.value().stage === 'info') {
+      if (!msg.photo) {
+        return this.bot.sendMessage( msg.chat.id, this.dictionary.attachPhoto);
+      }
+
       record.assign({
         stage: 'pending',
         photo: msg.photo,
       }).write();
+
       this.notifyAdmin(msg.chat.id);
+
       return this.bot.sendMessage(msg.chat.id, this.dictionary.cancel);
     }
 
-    if (!msg.entities) {
-      return this.bot.sendMessage( msg.chat.id, this.dictionary.hashtag);
+    // cancel reply
+    if (record.value().stage === 'pending') {
+      return this.bot.sendMessage(msg.chat.id, this.dictionary.cancel);
     }
-
-    record.assign({
-        stage: 'info',
-        text: msg.text,
-        hashtag: msg.entities.map(item => msg.text.slice(item.offset, item.offset + item.length)),
-      }).write();
-
-    this.bot.sendMessage( msg.chat.id, this.dictionary.attachPhoto);
   }
 
-  createCV(msg) {
-    const chatId = msg.chat.id;
-    const db = this.db.get('cvs');
-    const record = db.find({ id: msg.chat.id });
-    if (!record.value()) {
-      db.push({
-        id: msg.chat.id,
-        username: `@${msg.from.username}`,
-        stage: 'start',
-      }).write()
-    }
-    this.bot.sendMessage(chatId, this.dictionary.welcome);
+  messageCallback(msg) {
+    if (msg.chat.type !== 'private') return;
+    this.log.info({ msg });
+    return this.parseCommand(msg);
   }
 
   notifyAdmin(id) {
@@ -120,8 +211,8 @@ class Bot {
       caption: this.genCaption(record.username, record.text),
       reply_markup: {
         inline_keyboard: [
-          [{ text: 'ok (еще не работает)', callback_data: `sudo_approved_${record.id}` }],
-          [{ text: 'на хуй (еще не работает)', callback_data: `sudo_rejected_${record.id}` }],
+          [{ text: 'ok (вроде работает)', callback_data: `sudo_approved_${record.id}` }],
+          [{ text: 'на хуй (вроде работает)', callback_data: `sudo_rejected_${record.id}` }]
         ],
       },
     });
@@ -133,7 +224,8 @@ class Bot {
 
   approveCV(id, notify = true) {
     const record = this.db.get('cvs').find({ id });
-    if (!record) return;
+
+    if (!record.value()) return;
 
     let url;
 
@@ -143,18 +235,14 @@ class Bot {
     record.assign({
       id: `10000${id}`,
       stage: 'approved',
+      like: [],
+      dislike: [],
     }).write();
-
-    if (notify) return this.bot.sendMessage(id, this.dictionary.done); // mb useless...
-
-    if (username) url = 'https://t.me/' + username;
 
     this.bot.sendPhoto(process.env.CHANNEL, file_id, {
       caption: this.genCaption(username, text),
       reply_markup: {
-        inline_keyboard: [
-          [{ text: username, callback_data: `bbwy_open_10000${id}`, url }],
-        ],
+        inline_keyboard: this.likeKeyboard(id),
       },
     });
   }
@@ -163,7 +251,7 @@ class Bot {
     const id = msg.chat && msg.chat.id || msg;
     const record = this.db.get('cvs').find({ id });
 
-    if (!record) return;
+    if (!record.value()) return;
 
     record.assign({
       id: `00000${id}`,
@@ -174,12 +262,24 @@ class Bot {
   }
 
   genCaption(username, text) {
-    let txt = '';
-    if (username) txt += username + '\n\n';
-    txt += text;
-    return txt;
+    return `${username}\n${text}`;
   }
 
+  parseCommand(msg) {
+    if (msg.entities && msg.entities.some(ent => ent.type === 'bot_command')) {
+      return this.runBotCommand(msg);
+    }
+    return this.answerToMessage(msg);
+  }
+
+  likeKeyboard(id, like = 0, dislike = 0) {
+    let prefix = '';
+    if (typeof id === 'number') prefix = '10000';
+    return [[
+      { text: `❤️ (${like})`, callback_data: `_like_${prefix}${id}` },
+      { text: `💔 (${dislike})`, callback_data: `_dislike_${prefix}${id}` }
+    ]]
+  }
 }
 
 if (!module.parent) {
