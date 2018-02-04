@@ -15,9 +15,9 @@ class Bot {
     this.log = winston.createLogger({
       format: winston.format.json(),
       transports: [
-        new winston.transports.File({ filename: './logs/info.log', level: 'info' }),
-        new winston.transports.File({ filename: './logs/error.log', level: 'error' }),
-        new winston.transports.File({ filename: './logs/combined.log' })
+        new winston.transports.File({ filename: './info.log', level: 'info' }),
+        new winston.transports.File({ filename: './error.log', level: 'error' }),
+        new winston.transports.File({ filename: './combined.log' })
       ]
     });
 
@@ -67,6 +67,14 @@ class Bot {
 
         const record = this.db.get('cvs').find({ id });
         const value = record.value();
+
+        // rm inline keyboard if no record in db
+        if (!value) {
+          this.bot.editMessageReplyMarkup({}, {
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+          });
+        }
 
         const alreadyLiked = value.like.some(ent => ent.id === cq.from.id);
         const alreadyDisliked = value.dislike.some(ent => ent.id === cq.from.id);
