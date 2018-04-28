@@ -1,15 +1,22 @@
 const TelegramBot = require('node-telegram-bot-api');
-const FileSync = require('lowdb/adapters/FileSync');
-const low = require('lowdb');
-const winston = require('winston');
+const FileSync    = require('lowdb/adapters/FileSync');
+const low         = require('lowdb');
+const winston     = require('winston');
+const mongoose    = require('mongoose');
 
+const User        = require('./models/Kitty');
+
+require('log-timestamp');
 require('dotenv').config();
+
+mongoose.connect(`mongodb://bot:${process.env.MONGO_PASS}@${process.env.MONGO_URL}`);
+
 
 let __run__;
 
 class Bot {
   constructor(token = process.env.TOKEN) {
-    this.db = low(new FileSync('db.json'));
+
     this.dictionary = low(new FileSync('dictionary.json')).getState();
 
     this.log = winston.createLogger({
@@ -17,14 +24,13 @@ class Bot {
       transports: [
         new winston.transports.File({ filename: './info.log', level: 'info' }),
         new winston.transports.File({ filename: './error.log', level: 'error' }),
-        new winston.transports.File({ filename: './combined.log' })
       ]
     });
 
-
-    if (!this.db.has('posts').value()) {
-      this.db.defaults({ cvs: [] }).write();
-    }
+    mongoose.connection.on('error', this.log.error.bind(this.log.error, 'connection error:'));
+    mongoose.connection.once('open', () => {
+      this.log.info('Mongo is up.');
+    });
 
     this.messageCallback = this.messageCallback.bind(this);
     this.rejectCV = this.rejectCV.bind(this);
@@ -64,50 +70,39 @@ class Bot {
 
       if (status === 'like' || status === 'dislike') {
         this.log.info({ cq });
+        User.findOne({_id:id}).then((record) => {
 
-        const record = this.db.get('cvs').find({ id });
-        const value = record.value();
+          // rm inline keyboard if no record in db
+          if (!record) {
+            this.bot.editMessageReplyMarkup({}, {
+              chat_id: cq.message.chat.id,
+              message_id: cq.message.message_id,
+            });
+          }
 
-        // rm inline keyboard if no record in db
-        if (!value) {
-          this.bot.editMessageReplyMarkup({}, {
-            chat_id: cq.message.chat.id,
-            message_id: cq.message.message_id,
-          });
-        }
+          let request = '$push';
+          let likeLen = record.like.length + 1;
 
-        const alreadyLiked = value.like.some(ent => ent.id === cq.from.id);
-        const alreadyDisliked = value.dislike.some(ent => ent.id === cq.from.id);
+          if (record.like.some(ent => ent.id === cq.from.id)) {
+            request = '$pull';
+            likeLen -= 2;
+          }
 
-        if (alreadyLiked || alreadyDisliked) {
-          value.like = value.like.filter(ent => ent.id !== cq.from.id);
-          value.dislike = value.dislike.filter(ent => ent.id !== cq.from.id);
-        }
-
-        if ((!alreadyLiked && status === 'like') || (!alreadyDisliked && status === 'dislike')) {
-          value[status].push(cq.from);
-        }
-
-        record.assign({
-          like: value.like,
-          dislike: value.dislike,
-        }).write();
-
-        this.bot.editMessageReplyMarkup({
-            inline_keyboard: this.likeKeyboard(id, value.like.length, value.dislike.length)
-          }, {
-            chat_id: cq.message.chat.id,
-            message_id: cq.message.message_id,
-          });
+          User.findByIdAndUpdate(id, { [request]: { like: cq.from }}).then(() => {
+            this.bot.editMessageReplyMarkup({
+              inline_keyboard: this.likeKeyboard(id, likeLen)
+            }, {
+              chat_id: cq.message.chat.id,
+              message_id: cq.message.message_id,
+            }).catch(this.log.error);
+          }).catch(this.log.error);
+        });
       }
     });
 
     this.bot.on('message', this.messageCallback);
 
-    this.bot.on('polling_error', (error) => {
-      console.log(error)
-      this.log.error({ error });
-    });
+    this.bot.on('polling_error', this.log.error);
   }
 
   runBotCommand(msg) {
@@ -117,27 +112,31 @@ class Bot {
   }
 
   startCommand(msg) {
-    return this.bot.sendMessage(msg.chat.id, this.dictionary.startReply);
+    return this.bot.sendMessage(msg.chat.id, this.dictionary.startReply).catch(this.log.error);
   }
 
   createCommand(msg) {
     this.startScript(msg, (err) => {
       if (err) return this.handleInputError(err, msg);
-      return this.bot.sendMessage(msg.chat.id, this.dictionary.createReply);
+      return this.bot.sendMessage(msg.chat.id, this.dictionary.createReply).catch(this.log.error);
     });
   }
 
   cancelCommand(msg) {
-    const record = this.db.get('cvs').find({ id: msg.chat.id });
-
-    if (!record) return this.startCommand(msg);
-
-    record.assign({
-      id: `00000${msg.chat.id}`,
-      stage: 'canceled'
-    }).write();
-
-    return this.bot.sendMessage(msg.chat.id, this.dictionary.done);
+    User.findOne({
+      id: msg.chat.id,
+      is_published: false,
+      is_canceled: false,
+      is_rejected: false,
+    }).then((record) => {
+      if (!record) return this.startCommand(msg);
+      User.update({_id: record._id}, {
+        stage: 'canceled',
+        is_canceled: true,
+      }).then(() => {
+        return this.bot.sendMessage(msg.chat.id, this.dictionary.done).catch(this.log.error);
+      }).catch(this.log.error);
+    })
   }
 
   handleInputError(err, msg) {
@@ -147,62 +146,68 @@ class Bot {
   startScript(msg, cb) {
     if (!msg.from.username) return cb('NOUNAME');
 
-    const record = this.db.get('cvs').find({ id: msg.chat.id });
-
-    if (!record.value()) {
-      this.db.get('cvs').push({
-        id: msg.chat.id,
-        username: `@${msg.from.username}`,
-        stage: 'start',
-        create_date: new Date(),
-      }).write()
-    }
-    return cb(null);
+    User.findOne({
+      id: msg.chat.id,
+      is_published: false,
+      is_canceled: false,
+      is_rejected: false,
+    }).then((data) => {
+      if (!data) {
+        User.create({
+          id: msg.chat.id,
+          username: `@${msg.from.username}`,
+          stage: 'start',
+        }).then(this.log.info).catch(this.log.error);
+      }
+      return cb(null);
+    }).catch(this.log.error);
   }
 
   answerToMessage(msg) {
-    const record = this.db.get('cvs').find({ id: msg.chat.id });
-
-    if (!record.value()) {
-      return this.startCommand(msg);
-    }
-
-    // write info about user
-    if (record.value().stage === 'start') {
-      if (!msg.entities || !msg.entities.some(ent => ent.type === 'hashtag')) {
-        return this.bot.sendMessage( msg.chat.id, this.dictionary.hashtag);
+    User.findOne({
+      id: msg.chat.id,
+      is_published: false,
+      is_canceled: false,
+      is_rejected: false,
+    }).then((record) => {
+      if (!record) {
+        return this.startCommand(msg);
       }
 
-      record.assign({
-        stage: 'info',
-        text: msg.text,
-        update_date: new Date(),
-        hashtag: msg.entities.map(item => msg.text.slice(item.offset, item.offset + item.length)),
-      }).write();
+      if (record.stage === 'start') {
+        if (!msg.entities || !msg.entities.some(ent => ent.type === 'hashtag')) {
+          return this.bot.sendMessage( msg.chat.id, this.dictionary.hashtag);
+        }
 
-      return this.bot.sendMessage( msg.chat.id, this.dictionary.attachPhoto);
-    }
-
-    // attach photo
-    if (record.value().stage === 'info') {
-      if (!msg.photo) {
-        return this.bot.sendMessage( msg.chat.id, this.dictionary.attachPhoto);
+        User.update({ _id: record._id }, {
+          $set: {
+            stage: 'info',
+            text: msg.text,
+            hashtag: msg.entities.map(item => msg.text.slice(item.offset, item.offset + item.length)),
+          }
+        }).then(() => this.bot.sendMessage( msg.chat.id, this.dictionary.attachPhoto)).catch(this.log.error);
       }
 
-      record.assign({
-        stage: 'pending',
-        photo: msg.photo,
-      }).write();
+      if (record.stage === 'info') {
+        if (!msg.photo) {
+          return this.bot.sendMessage( msg.chat.id, this.dictionary.attachPhoto);
+        }
 
-      this.notifyAdmin(msg.chat.id);
+        User.update({ _id: record._id }, {
+          $set: {
+            stage: 'pending',
+            photo: msg.photo,
+          }
+        }).then(() => {
+          this.notifyAdmin(msg.chat.id);
+          return this.bot.sendMessage(msg.chat.id, this.dictionary.cancel);
+        }).catch(this.log.error);
 
-      return this.bot.sendMessage(msg.chat.id, this.dictionary.cancel);
-    }
-
-    // cancel reply
-    if (record.value().stage === 'pending') {
-      return this.bot.sendMessage(msg.chat.id, this.dictionary.cancel);
-    }
+      }
+      if (record.stage === 'pending') {
+        return this.bot.sendMessage(msg.chat.id, this.dictionary.cancel);
+      }
+    });
   }
 
   messageCallback(msg) {
@@ -212,18 +217,23 @@ class Bot {
   }
 
   notifyAdmin(id) {
-    const db = this.db.get('cvs');
-    const record = db.find({ id }).value();
-    if (!record) return;
-    this.bot.sendPhoto(process.env.ADMIN_GROUP, record.photo[0].file_id, {
-      caption: this.genCaption(record.username, record.text),
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: 'ok (вроде работает)', callback_data: `sudo_approved_${record.id}` }],
-          [{ text: 'на хуй (вроде работает)', callback_data: `sudo_rejected_${record.id}` }]
-        ],
-      },
-    });
+    User.findOne({
+      id,
+      is_published: false,
+      is_canceled: false,
+      is_rejected: false,
+    }).then((record) => {
+      if (!record) return;
+      this.bot.sendPhoto(process.env.ADMIN_GROUP, record.photo[0].file_id, {
+        caption: this.genCaption(record.username, record.text),
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: 'ok (вроде работает)', callback_data: `sudo_approved_${record.id}` }],
+            [{ text: 'на хуй (вроде работает)', callback_data: `sudo_rejected_${record.id}` }]
+          ],
+        },
+      });
+    }).catch(this.log.error);
   }
 
   notifyUser(id, status) {
@@ -231,42 +241,49 @@ class Bot {
   }
 
   approveCV(id, notify = true) {
-    const record = this.db.get('cvs').find({ id });
+    User.findOne({
+      id,
+      stage: 'pending',
+      is_published: false,
+      is_canceled: false,
+      is_rejected: false,
+    }).then((record) => {
+      if (!record) return;
 
-    if (!record.value()) return;
+      const { username, text } = record;
+      const { file_id } = record.photo[0];
 
-    let url;
-
-    const { username, text } = record.value();
-    const { file_id } = record.value().photo[0];
-
-    record.assign({
-      id: `10000${id}`,
-      stage: 'approved',
-      like: [],
-      dislike: [],
-    }).write();
-
-    this.bot.sendPhoto(process.env.CHANNEL, file_id, {
-      caption: this.genCaption(username, text),
-      reply_markup: {
-        inline_keyboard: this.likeKeyboard(id),
-      },
-    });
+      User.update({ _id: record._id }, {
+        stage: 'approved',
+        is_published: true,
+      }).then(() => {
+        this.bot.sendPhoto(process.env.CHANNEL, file_id, {
+          caption: this.genCaption(username, text),
+          reply_markup: {
+            inline_keyboard: this.likeKeyboard(record._id),
+          },
+        });
+      }).catch(this.log.error);
+    }).catch(this.log.error);
   }
 
   rejectCV(msg, notify = true) {
     const id = msg.chat && msg.chat.id || msg;
-    const record = this.db.get('cvs').find({ id });
-
-    if (!record.value()) return;
-
-    record.assign({
-      id: `00000${id}`,
-      stage: 'rejected'
-    }).write();
-
-    if (notify) return this.bot.sendMessage(id, this.dictionary.done);
+    User.findOne({
+      id,
+      stage: 'pending',
+      is_published: false,
+      is_canceled: false,
+      is_rejected: false,
+    }).then((record) => {
+      if (!record) return;
+      User.update({_id: record._id}, {
+        stage: 'rejected',
+        is_rejected: true,
+      }).then(() => {
+        if (notify) return this.bot.sendMessage(id, this.dictionary.done);
+      }).catch(this.log.error);
+    }).catch(this.log.error);
   }
 
   genCaption(username, text) {
@@ -284,8 +301,8 @@ class Bot {
     let prefix = '';
     if (typeof id === 'number') prefix = '10000';
     return [[
-      { text: `❤️ (${like})`, callback_data: `_like_${prefix}${id}` },
-      { text: `💔 (${dislike})`, callback_data: `_dislike_${prefix}${id}` }
+      { text: `🍜 (${like})`, callback_data: `_like_${prefix}${id}` },
+      // { text: `💔 (${dislike})`, callback_data: `_dislike_${prefix}${id}` }
     ]]
   }
 }
