@@ -2,10 +2,6 @@
 
 ### todo:
 
-- mongodb
-
-- logs
-
 - image arrays
 
 - subscribe check
