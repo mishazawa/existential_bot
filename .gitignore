@@ -58,3 +58,5 @@ typings/
 .env
 
 db.json
+
+config.ts

@@ -4,30 +4,26 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "mocha --watch"
+    "start": "ts-node index.ts"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/fffuture/existential_bot.git"
+    "url": "git+https://github.com/mishazawa/existential_bot.git"
   },
   "author": "",
   "license": "ISC",
   "bugs": {
-    "url": "https://github.com/fffuture/existential_bot/issues"
+    "url": "https://github.com/mishazawa/existential_bot/issues"
   },
-  "homepage": "https://github.com/fffuture/existential_bot#readme",
+  "homepage": "https://github.com/mishazawa/existential_bot#readme",
   "dependencies": {
-    "dotenv": "^5.0.0",
+    "@types/node-telegram-bot-api": "^0.31.0",
+    "firebase": "^7.0.0",
     "log-timestamp": "^0.1.2",
-    "lowdb": "^1.0.0",
-    "mongoose": "^5.0.16",
-    "node-telegram-bot-api": "^0.30.0",
-    "winston": "^3.0.0-rc1"
+    "node-telegram-bot-api": "^0.30.0"
   },
   "devDependencies": {
-    "chai": "^4.1.2",
-    "mocha": "^5.0.0",
-    "request": "^2.83.0",
-    "request-promise": "^4.2.2"
+    "ts-node": "^8.4.1",
+    "typescript": "^3.6.3"
   }
 }
